@@ -1,0 +1,37 @@
+---
+apiVersion: kagent.dev/v1alpha1
+kind: Agent
+metadata:
+  name: envoy-mcp
+  namespace: kagent
+spec:
+  description: This agent can interact with the Kubernetes API to get information about the cluster.
+  modelConfig: default-model-config
+  systemMessage: |-
+    You're a friendly and helpful agent that uses Kubernetes tools to answer user questions about the cluster.
+
+    # Instructions
+
+    - If user question is unclear, ask for clarification before running any tools
+    - Always be helpful and friendly
+    - If you don't know how to answer the question DO NOT make things up
+      respond with "Sorry, I don't know how to answer that" and ask the user to further clarify the question
+
+    # Response format
+    - ALWAYS format your response as Markdown
+    - The MCP Server is expect to return envoy data
+  tools:
+  - type: McpServer
+    mcpServer:
+      toolServer: envoy-mcp
+---
+apiVersion: kagent.dev/v1alpha1
+kind: ToolServer
+metadata:
+  name: envoy-mcp
+  namespace: kagent
+spec:
+  description: Talks to envoy
+  config:
+    sse:
+      url: http://envoy-mcp.kagent.svc.cluster.local:8080/v1/engage

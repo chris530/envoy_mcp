@@ -1,0 +1,29 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: allow-ephemeral-debug
+rules:
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bind-envoy-debug-role
+subjects:
+  - kind: ServiceAccount
+    name: envoy
+    namespace: kagent
+roleRef:
+  kind: ClusterRole
+  name: allow-ephemeral-debug
+  apiGroup: rbac.authorization.k8s.io
+
