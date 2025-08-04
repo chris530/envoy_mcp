@@ -27,7 +27,7 @@ spec:
       - env:
         - name: mcp_envoy
           value: "true"
-        image: chris530/envoy_mcp:latest
+        image: chris530/envoy_mcp:10
         imagePullPolicy: Always
         name: envoymcp
         ports:
