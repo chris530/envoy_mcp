@@ -1,14 +1,9 @@
-# Chris Haessig  7/31/25
-
-from flask import Flask, request, jsonify
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 import requests
 import time
 import logging
-
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+from mcp.server.fastmcp import FastMCP
 
 DEBUG_CONTAINER_NAME = "socat-debug"
 SOCAT_IMAGE = "alpine/socat"
@@ -18,35 +13,58 @@ config.load_incluster_config()
 #config.load_kube_config()
 core_api = client.CoreV1Api()
 
+# Logging 
+
+logger = logging.getLogger("envoy_mcp")
 
 # Kubernetes logic 
 
-def patch_ephemeral_container(namespace, podname, lk, lv):
-    patch = {
-        "spec": {
-            "ephemeralContainers": [
-                {
-                    "name": DEBUG_CONTAINER_NAME,
-                    "image": SOCAT_IMAGE,
-                    "command": ["socat", f"TCP-LISTEN:{SERVICE_PORT},fork", "TCP:localhost:15000"],
-                    "stdin": True,
-                    "tty": True,
-                    "securityContext": {"privileged": True}
-                }
-            ]
-        }
-    }
-
+def patch_ephemeral_container_by_label(namespace, lk, lv):
+    label_selector = f"{lk}={lv}"
+    
     try:
-        core_api.patch_namespaced_pod_ephemeralcontainers(
-            name=podname,
+        # Step 1: List pods with label
+        pods = core_api.list_namespaced_pod(
             namespace=namespace,
-            body=patch
+            label_selector=label_selector
         )
-        return f"Ephemeral container added to pod '{podname}'."
-    except ApiException as e:
-        return f"Error patching pod: {e.status} {e.reason} {e.body}"
 
+        if not pods.items:
+            return f"No pods found in namespace '{namespace}' with label {lk}={lv}."
+
+        responses = []
+
+        for pod in pods.items:
+            podname = pod.metadata.name
+            patch = {
+                "spec": {
+                    "ephemeralContainers": [
+                        {
+                            "name": DEBUG_CONTAINER_NAME,
+                            "image": SOCAT_IMAGE,
+                            "command": ["socat", f"TCP-LISTEN:{SERVICE_PORT},fork", "TCP:localhost:15000"],
+                            "stdin": True,
+                            "tty": True,
+                            "securityContext": {"privileged": True}
+                        }
+                    ]
+                }
+            }
+
+            try:
+                core_api.patch_namespaced_pod_ephemeralcontainers(
+                    name=podname,
+                    namespace=namespace,
+                    body=patch
+                )
+                responses.append(f"Ephemeral container added to pod '{podname}'.")
+            except ApiException as e:
+                responses.append(f"Error patching pod '{podname}': {e.status} {e.reason} {e.body}")
+
+        return "\n".join(responses)
+
+    except ApiException as e:
+        return f"Error listing pods: {e.status} {e.reason} {e.body}"
 
 def create_service(namespace, lk, lv):
     service = client.V1Service(
@@ -75,15 +93,6 @@ def create_service(namespace, lk, lv):
         else:
             return f"Error creating service: {e.status} {e.reason} {e.body}" 
 
-def restart_pod(podname, namespace):
-
-    try:
-        core_api.delete_namespaced_pod(name=podname, namespace=namespace)
-        return f"Pod '{podname}' deleted for restart."
-    except ApiException as e:
-        return f"Failed to delete pod: {e.status} {e.reason} {e.body}", 500
-
-
 
 def delete_service(namespace):
     try:
@@ -91,73 +100,32 @@ def delete_service(namespace):
         return f"Service '{SERVICE_NAME}' deleted from namespace '{namespace}'."
     except ApiException as e:
         if e.status == 404:
-            return f"ℹ️ Service '{SERVICE_NAME}' not found.", 200
+            return f"ℹ️Service '{SERVICE_NAME}' not found.", 200
         return f"Failed to delete service: {e.status} {e.reason} {e.body}", 500
 
-def query_service(namespace):
+mcp = FastMCP(name="EnvoyQueryServer")
 
-    HIT_URL = "http://"+SERVICE_NAME+"."+namespace+":"+str(SERVICE_PORT)+"/config_dump"
+@mcp.tool()
+def query_envoy(namespace: str, labels: str):
 
-    return requests.get(HIT_URL).text
+   logger.info("Query envoy with: %s", namespace + " " + labels )
 
+   lk = labels.split("=")[0]
+   lv = labels.split("=")[1]
 
-# Flask 
+   patch_ephemeral_container_by_label(namespace, lk, lv)
+   create_service(namespace, lk, lv)
+   time.sleep(3) 
 
-@app.route('/v1', methods=['GET'])
-def root():
-    return jsonify({
-        "name": "Envoy MCP Server",
-        "version": "1.0.0",
-        "type": "model"
-    })
+   try:
 
-@app.route('/v1/schema', methods=['GET'])
-def schema():
-    return jsonify({
-        "input": {
-            "type": "object",
-            "properties": {
-                "podname": {"type": "string"},
-                "namespace": {"type": "string"},
-                "labels": {"type": "string"}
-            },
-            "required": ["podname", "namespace", "labels"]
-        },
-        "output": {
-            "type": "object",
-            "properties": {
-                "config": {"type": "string", "description": "Generated configuration file from envoy"}
-            }
-        }
-    })
+        HIT_URL = "http://envoy-debug.web:5555/memory"
+        response = requests.get(HIT_URL, timeout=5)
+        return response.text
 
-@app.route('/v1/engage', methods=['POST'])
-def engage():
-
-    # need the pod name , labels and namespace 
-
-    input_data = request.json
-    podname = input_data.get("podname", "")
-    namespace = input_data.get("namespace", "")
-    labels = input_data.get("labels", "")
-    lk = labels.split("=")[0]
-    lv = labels.split("=")[1]
-
-    # Seems we need to add a little time to create the service so a delay was added.  
-
-    app.logger.info("Patching pod "+podname)
-    patch_ephemeral_container(namespace, podname, lk, lv)
-    app.logger.info("Creating service with labels"+lk+"="+lv)
-    create_service(namespace, lk, lv)
-    time.sleep(3)
-    data = query_service(namespace)
-    app.logger.info("Delete service "+namespace)
-    delete_service(namespace)
-
-    return jsonify({"config": data})
-    
-
+   except Exception as e:
+        return f"query_envoy failed: {str(e)}" 
+ 
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8080)
-
+    mcp.run()
